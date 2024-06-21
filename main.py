@@ -8,6 +8,9 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.impute import SimpleImputer
 from joblib import dump, load
 import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 # Load and prepare the data
 def load_data(file_path):
@@ -42,12 +45,30 @@ def prepare_data(df):
     y = df['battery_state']
     return X, y
 
+# Define the DNN model
+class DNN(nn.Module):
+    def __init__(self, input_dim):
+        super(DNN, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
 # Define the ensemble model
 class EnsembleModel:
-    def __init__(self):
+    def __init__(self, input_dim):
         self.rf = RandomForestRegressor(n_estimators=100, random_state=42)
         self.gb = GradientBoostingRegressor(n_estimators=100, random_state=42)
         self.svr = SVR(kernel='rbf')
+        self.dnn = DNN(input_dim)
         self.imputer = SimpleImputer(strategy='mean')
 
     def fit(self, X, y):
@@ -56,16 +77,35 @@ class EnsembleModel:
         self.gb.fit(X_imputed, y)
         self.svr.fit(X_imputed, y)
 
+        # Train DNN
+        X_tensor = torch.FloatTensor(X_imputed)
+        y_tensor = torch.FloatTensor(y.values).reshape(-1, 1)
+        optimizer = optim.Adam(self.dnn.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+
+        for epoch in range(100):  # You can adjust the number of epochs
+            optimizer.zero_grad()
+            outputs = self.dnn(X_tensor)
+            loss = criterion(outputs, y_tensor)
+            loss.backward()
+            optimizer.step()
+
     def predict(self, X):
         X_imputed = self.imputer.transform(X)
         rf_pred = self.rf.predict(X_imputed)
         gb_pred = self.gb.predict(X_imputed)
         svr_pred = self.svr.predict(X_imputed)
-        ensemble_pred = (rf_pred + gb_pred + svr_pred) / 3
+
+        X_tensor = torch.FloatTensor(X_imputed)
+        with torch.no_grad():
+            dnn_pred = self.dnn(X_tensor).numpy().flatten()
+
+        ensemble_pred = (rf_pred + gb_pred + svr_pred + dnn_pred) / 4
         return {
             'rf': rf_pred,
             'gb': gb_pred,
             'svr': svr_pred,
+            'dnn': dnn_pred,
             'ensemble': ensemble_pred
         }
 
@@ -85,7 +125,7 @@ def train_or_load_model(X, y, model_path='ensemble_model.joblib', scaler_path='s
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        model = EnsembleModel()
+        model = EnsembleModel(input_dim=X_train_scaled.shape[1])
         model.fit(X_train_scaled, y_train)
 
         # Save the model and scaler
@@ -151,4 +191,5 @@ if __name__ == "__main__":
     print(f"Random Forest: {predictions['rf'][0]:.4f}")
     print(f"Gradient Boosting: {predictions['gb'][0]:.4f}")
     print(f"Support Vector Regression: {predictions['svr'][0]:.4f}")
+    print(f"Deep Neural Network: {predictions['dnn'][0]:.4f}")
     print(f"Ensemble (Average): {predictions['ensemble'][0]:.4f}")
